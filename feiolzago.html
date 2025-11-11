@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>As Aventuras Matematicas de Feil Zago</title>
+<style>
+  /* ui base, tudo pixelado pra vibe retrô */
+  html, body { height: 100%; margin: 0; background: #0a0a19; color: #dfe3f0; font-family: monospace; user-select: none; overflow: hidden; }
+  body { cursor: none; }
+  #wrap { display: grid; place-items: center; height: 100%; }
+  canvas { background: #0a0a19; box-shadow: 0 10px 30px rgba(0,0,0,0.45); border-radius: 12px; image-rendering: pixelated; image-rendering: crisp-edges; }
+  .overlay { position: fixed; inset: 0; display: grid; place-items: center; pointer-events: none; }
+  .center { text-align: center; pointer-events: auto; }
+  .title { font-size: 20px; font-weight: 800; margin: 6px 0 2px; }
+  .subtitle { font-size: 14px; margin: 2px 0 10px; }
+  .btn { font-family: monospace; font-size: 14px; padding: 8px 12px; background: #2c2f5c; color: #fff; border: 0; border-radius: 10px; cursor: pointer; }
+  .btn:hover { filter: brightness(1.15); }
+</style>
+</head>
+<body>
+  <div id="wrap">
+    <canvas id="game" width="900" height="600"></canvas>
+    <div class="overlay">
+      <div class="center" id="start">
+        <div class="title">As Aventuras Matematicas de Feil Zago</div>
+        <div class="subtitle">Clique para comecar</div>
+        <button class="btn" id="startBtn">Jogar</button>
+      </div>
+      <div class="center" id="gameover" style="display:none">
+        <div class="title">Fim de jogo</div>
+        <div class="subtitle" id="pontuacaoFinal">Pontuacao 0</div>
+        <button class="btn" id="restartBtn">Reiniciar</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  // ok bora setar o canvas
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d', { alpha: true });
+  ctx.imageSmoothingEnabled = false; // sem blur pra ficar 2d pixel vibe
+
+  // dimensoes fixas pra gameplay consistente
+  const W = canvas.width;
+  const H = canvas.height;
+
+  // refs de ui
+  const UI = {
+    startBox: document.getElementById('start'),
+    startBtn: document.getElementById('startBtn'),
+    overBox: document.getElementById('gameover'),
+    restartBtn: document.getElementById('restartBtn'),
+    finalScore: document.getElementById('pontuacaoFinal')
+  };
+
+  // paleta centralizada
+  const COR = {
+    fundo: '#0a0a19',
+    painel: '#101224',
+    painelBorda: '#1b1f3a',
+    texto: '#dfe3f0',
+    textoFraco: '#b8bdd9',
+    mira: '#f0f0f0',
+    cometa: '#ff8c50',
+    correto: '#50dc78',
+    errado: '#e64646',
+    fumaca: '#b4b4b4',
+    trilha: 'rgba(230,210,190,0.9)'
+  };
+
+  // linha de base do canhao
+  const LINHA_Y = H - 100;
+
+  // helpers rapidinhos
+  const i = v => Math.round(v);
+  const clamp = (v,a,b)=>Math.max(a, Math.min(b, v));
+  const rand = (min,max)=>Math.random()*(max-min)+min;
+  const irand = (min,max)=>Math.floor(rand(min,max+1));
+
+  // estado global
+  let rodando = false;
+  let ultimoTempo = 0;
+
+  // input mouse e teclado
+  let mouse = { x: W/2, y: H/2, down: false };
+  const keys = { left: false, right: false };
+
+  // game state basico
+  const estado = {
+    pontos: 0,
+    vidas: 3,
+    combo: 0,
+    nivel: 1,
+    acertosSeguidos: 0,
+    velBase: 0.9,
+    enunciado: 'Calcule',
+    correta: '0',
+    alternativas: [],
+    cometas: [],
+    particulas: [],
+    balas: [],
+    explodiu: false
+  };
+
+  // func pra setar fonte sempre igual
+  function setFont(size=16, bold=false){
+    ctx.font = `${bold?'bold ':''}${size}px monospace`;
+  }
+
+  // desenha mira so pra feedback do mouse
+  function desenharMira(){
+    // papo rapido a mira ajuda o player a focar no alvo sem poluir a tela
+    ctx.save();
+    ctx.strokeStyle = COR.mira;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(i(mouse.x), i(mouse.y), 12, 0, Math.PI*2);
+    ctx.moveTo(i(mouse.x-16), i(mouse.y));
+    ctx.lineTo(i(mouse.x+16), i(mouse.y));
+    ctx.moveTo(i(mouse.x), i(mouse.y-16));
+    ctx.lineTo(i(mouse.x), i(mouse.y+16));
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // particulas simples pra juice visual
+  class Particula{
+    constructor(x,y,cor,raio=2,vida=24,vx=0,vy=0,grav=0,fade=true){
+      // sim, é um ponto com vida e alpha decaindo
+      this.x=x; this.y=y; this.vx=vx; this.vy=vy;
+      this.vida=vida; this.vidaMax=vida;
+      this.cor=cor; this.raio=raio; this.grav=grav; this.fade=fade;
+    }
+    update(dt){
+      this.vy += this.grav * dt * 60;
+      this.x += this.vx * dt * 60;
+      this.y += this.vy * dt * 60;
+      this.vida -= dt * 60;
+    }
+    draw(){
+      if(this.vida<=0) return;
+      const a = this.fade ? Math.max(0.12, this.vida/this.vidaMax) : 1;
+      ctx.save();
+      ctx.globalAlpha = a;
+      ctx.fillStyle = this.cor;
+      ctx.beginPath();
+      ctx.arc(i(this.x), i(this.y), this.raio, 0, Math.PI*2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  // cometa que traz a alternativa
+  class Cometa{
+    constructor(x,y,vel,texto,correta){
+      this.x=x; this.y=y; this.vel=vel;
+      this.texto=texto; this.correta=correta;
+      this.raio=34; this.vivo=true;
+    }
+    update(dt){
+      this.y += this.vel * dt * 60;
+      if(this.y - this.raio > H + 10) this.vivo=false;
+    }
+    draw(){
+      // forma simples circular pra ficar legível com fonte centrada
+      ctx.save();
+      ctx.fillStyle = COR.cometa;
+      ctx.beginPath();
+      ctx.arc(i(this.x), i(this.y), this.raio, 0, Math.PI*2);
+      ctx.fill();
+      // trilha embaixo pra dar leitura de movimento
+      ctx.strokeStyle = COR.trilha;
+      ctx.lineWidth = 8;
+      ctx.beginPath();
+      ctx.moveTo(i(this.x - 36), i(this.y + 12));
+      ctx.lineTo(i(this.x + 36), i(this.y + 12));
+      ctx.stroke();
+      // numero dentro
+      setFont(16, true);
+      ctx.fillStyle = '#141414';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(this.texto, i(this.x), i(this.y));
+      ctx.restore();
+    }
+  }
+
+  // bala sobe e explode ao colidir
+  class Bala{
+    constructor(x,y){
+      // sussa, bala pra cima vertical
+      const vel = 560;
+      this.x = x; this.y = y;
+      this.vx = 0;
+      this.vy = -vel;
+      this.r = 3;
+      this.viva = true;
+    }
+    update(dt){
+      this.x += this.vx * dt;
+      this.y += this.vy * dt;
+      if(this.y < -20) this.viva = false;
+    }
+    draw(){
+      ctx.save();
+      ctx.fillStyle = '#ffe08a';
+      ctx.fillRect(i(this.x - this.r), i(this.y - this.r), this.r*2, this.r*2);
+      ctx.restore();
+    }
+  }
+
+  // sprite aqui, reto sempre, a gente usa pivot pra encaixar no chão
+  const SpriteCanhao = {
+    img: new Image(),
+    ready: false,
+    triedFallback: false,
+    scale: 0.45,             // se quiser maior, só subir esse cara
+    pivotRel: { x: 0.36, y: 0.80 }, // relativo dentro do sprite
+    w: 0, h: 0,
+    load(){
+      // idéia é carregar local agsprite.png, se não tiver tenta um fallback online
+      this.img.crossOrigin = 'anonymous';
+      this.img.onload = () => { this.ready = true; this.w = this.img.width; this.h = this.img.height; };
+      this.img.onerror = () => {
+        if (!this.triedFallback) {
+          this.triedFallback = true;
+          this.img.src = 'https://i.imgur.com/9O8u8Yh.png';
+        }
+      };
+      this.img.src = 'agsprite.png';
+    },
+    drawUpright(x,y){
+      if(!this.ready){
+        // placeholder quadradinho pra não quebrar visual
+        ctx.save();
+        ctx.translate(i(x), i(y));
+        ctx.fillStyle = '#7aa4d6';
+        ctx.fillRect(-18, -36, 36, 36);
+        ctx.restore();
+        return;
+      }
+      const s = this.scale;
+      const w = this.w * s;
+      const h = this.h * s;
+      const px = this.pivotRel.x * w;
+      const py = this.pivotRel.y * h;
+      ctx.save();
+      ctx.translate(i(x), i(y));
+      // sem rotate aqui pra manter reto
+      ctx.drawImage(this.img, i(-px), i(-py), i(w), i(h));
+      ctx.restore();
+    },
+    centerWorldUpright(x,y){
+      // isso acha o centro visual da imagem já considerando o pivot
+      const s = this.scale;
+      const w = this.w * s;
+      const h = this.h * s;
+      const px = this.pivotRel.x * w;
+      const py = this.pivotRel.y * h;
+      const cx = w*0.5 - px;
+      const cy = h*0.5 - py;
+      return { x: x + cx, y: y + cy };
+    }
+  };
+  SpriteCanhao.load();
+
+  // aqui vem o movimento novo, mais dinâmico
+  // ideía é ter accel, max speed, friction e um auto ease quando solta
+  class CanhaoFixo {
+    constructor(){
+      this.x = W/2;
+      this.y = LINHA_Y;
+
+      // movimento com fisica simples
+      // valores tunados pra ficar juicy e responsivo
+      this.vx = 0;
+      this.ax = 0;
+      this.accel = 2200;     // empurrao quando segura A ou D
+      this.friction = 1600;  // atrito quando solta tecla
+      this.maxSpeed = 520;   // teto de velocidade pra nao voar
+
+      // ease to center opcional leve pra compor suavidade
+      this.centerPull = 0;   // deixa 0 se nao quiser puxar pro meio
+
+      // tiro
+      this.cooldown = 0;
+      this.fireDelay = 120;  // mais responsivo sem virar metralhadora
+      this.shotTimer = 0;
+    }
+    update(dt){
+      // input em forma de direcao
+      const dir = (keys.right?1:0) - (keys.left?1:0);
+
+      // conversa rapida
+      // se tem input, a gente acelera forte
+      // se nao tem, freia com friction suave
+      if (dir !== 0) {
+        this.ax = dir * this.accel;
+      } else {
+        // aplica atrito oposto ao movimento atual
+        const vSign = Math.sign(this.vx);
+        const decel = this.friction * dt;
+        if (Math.abs(this.vx) <= decel) this.vx = 0;
+        else this.vx -= vSign * decel;
+        this.ax = 0;
+      }
+
+      // opcionalzinho, puxa levemente pro centro pra pose bonita
+      if (this.centerPull !== 0 && dir === 0) {
+        const dx = W*0.5 - this.x;
+        this.ax += dx * this.centerPull; // bem baixinho pra nao atrapalhar
+      }
+
+      // integra velocidade e clampa
+      this.vx += this.ax * dt;
+      this.vx = clamp(this.vx, -this.maxSpeed, this.maxSpeed);
+
+      // posição
+      this.x += this.vx * dt;
+
+      // limites da tela
+      this.x = clamp(this.x, 40, W - 40);
+      this.y = LINHA_Y;
+
+      // tiro continuo com mouse pressionado
+      if(this.cooldown>0) this.cooldown -= dt*1000;
+      if (mouse.down) this.shotTimer += dt*1000; else this.shotTimer = 0;
+      if (mouse.down && this.shotTimer >= this.fireDelay) {
+        this.shotTimer = 0;
+        const b = this.atirar();
+        if (b) estado.balas.push(b);
+      }
+    }
+    atirar(){
+      // sim, espaço ou mouse disparam
+      if(this.cooldown>0) return null;
+      this.cooldown = this.fireDelay;
+      const m = SpriteCanhao.centerWorldUpright(this.x, this.y);
+      return new Bala(m.x, m.y);
+    }
+    draw(){
+      // sprite reto
+      SpriteCanhao.drawUpright(this.x, this.y);
+      // linha de base pra referência do player
+      ctx.save();
+      ctx.strokeStyle = 'rgba(220,220,255,0.15)';
+      ctx.setLineDash([4,4]);
+      ctx.beginPath();
+      ctx.moveTo(0, i(LINHA_Y));
+      ctx.lineTo(W, i(LINHA_Y));
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // gerador das questoes matematicas
+  const Gerador = {
+    nivel: 1,
+    intervalo(){ if(this.nivel<=1) return [0,10]; if(this.nivel===2) return [0,20]; if(this.nivel===3) return [0,40]; if(this.nivel===4) return [0,60]; return [0,100]; },
+    escolherOp(){ if(this.nivel===1) return ['+','-'][irand(0,1)]; if(this.nivel===2) return ['+','-','×'][irand(0,2)]; return ['+','-','×','÷'][irand(0,3)]; },
+    gerarOperandos(op){
+      // hmm aqui a gnt garante valores validos e divisão inteira
+      const [lo,hi] = this.intervalo();
+      let a=irand(lo,hi), b=irand(lo,hi);
+      if(op==='-' && a<b){ const t=a; a=b; b=t; }
+      if(op==='÷'){
+        b = Math.max(1, irand(1, Math.max(1, Math.floor(hi/2))));
+        const q = Math.max(1, irand(1, Math.max(1, Math.floor(hi/2))));
+        a = b*q;
+      }
+      return [a,b];
+    },
+    calcular(a,b,op){ if(op==='+') return a+b; if(op==='-') return a-b; if(op==='×') return a*b; if(op==='÷') return b!==0 ? Math.floor(a/b) : 0; return 0; },
+    distratores(correta,a,b,op){
+      // opa, bora criar distratores que parecem plausiveis
+      const ds = new Set();
+      let tent=0;
+      while(ds.size<3 && tent<100){
+        tent++;
+        let cand;
+        if(op==='+') cand = correta + [ -3,-2,-1,1,2,3 ][irand(0,5)];
+        else if(op==='-'){ const erro=a+b; cand = [erro, correta + [ -3,-1,1,3 ][irand(0,3)]][irand(0,1)]; }
+        else if(op==='×'){ const erro=a+b; const delta=[ -a,-b,a,b,-3,3 ][irand(0,5)]; cand=[erro, correta+delta][irand(0,1)]; }
+        else { const erro=a-b; cand=[erro, correta + [ -2,-1,1,2 ][irand(0,3)]][irand(0,1)]; }
+        if(String(cand)!==String(correta)) ds.add(String(cand));
+      }
+      return Array.from(ds);
+    },
+    questao(){
+      // beleza, setup do enunciado e embaralha alternativas
+      const op = this.escolherOp();
+      const [a,b] = this.gerarOperandos(op);
+      const correta = this.calcular(a,b,op);
+      const enun = `Calcule ${a} ${op} ${b}`;
+      const alternativas = [String(correta), ...this.distratores(correta,a,b,op)];
+      for(let k=alternativas.length-1;k>0;k--){ const j=irand(0,k); [alternativas[k], alternativas[j]]=[alternativas[j],alternativas[k]]; }
+      return { enunciado: enun, correta: String(correta), alternativas };
+    }
+  };
+
+  // instancia do canhao com fisica nova
+  const canhao = new CanhaoFixo();
+
+  // rodada nova com cometas gerados
+  function novaRodada(){
+    // limpa e spawna
+    estado.cometas.length = 0;
+    const q = Gerador.questao();
+    estado.enunciado = q.enunciado;
+    estado.correta = q.correta;
+    estado.alternativas = q.alternativas;
+    const pos = [W*0.2, W*0.4, W*0.6, W*0.8];
+    for(let i=pos.length-1;i>0;i--){ const j=irand(0,i); [pos[i],pos[j]]=[pos[j],pos[i]]; }
+    const velocidade = estado.velBase + Gerador.nivel * 0.15;
+    for(let k=0;k<estado.alternativas.length;k++){
+      const alt = estado.alternativas[k];
+      estado.cometas.push(new Cometa(pos[k], -40, velocidade, alt, alt===estado.correta));
+    }
+  }
+
+  // progressão de dificuldade baseada em streak
+  function aumentarDificuldadeSeNecessario(){
+    // kkk upa o nivel a cada 3 acertos seguidos
+    if(estado.acertosSeguidos>=3){
+      estado.acertosSeguidos=0;
+      Gerador.nivel = Math.min(6, Gerador.nivel+1);
+      estado.nivel = Gerador.nivel;
+      estado.velBase += 0.15;
+    }
+  }
+
+  // dano simples com particulas
+  function registrarDano(){
+    estado.combo=0;
+    estado.acertosSeguidos=0;
+    estado.vidas -= 1;
+    for(let k=0;k<28;k++){
+      const ang = rand(-Math.PI, 0);
+      const vel = rand(0.5, 2.2);
+      const vx = Math.cos(ang)*vel;
+      const vy = Math.sin(ang)*vel;
+      estado.particulas.push(new Particula(canhao.x, canhao.y+10, COR.fumaca, irand(3,7), irand(28,46), vx, vy, -0.01, true));
+    }
+    if(estado.vidas<=0) explodir();
+  }
+
+  // explosao pra fechar com estilo
+  function explodir(){
+    if(estado.explodiu) return;
+    estado.explodiu = true;
+    for(let k=0;k<120;k++){
+      const ang = rand(0, Math.PI*2);
+      const vel = rand(1.0, 4.0);
+      const cores = ['rgb(255,200,120)','rgb(255,160,80)','rgb(255,90,60)','rgb(220,220,220)'];
+      const cor = cores[irand(0, cores.length-1)];
+      const r = irand(2,4);
+      estado.particulas.push(new Particula(canhao.x, canhao.y, cor, r, irand(24,60), Math.cos(ang)*vel, Math.sin(ang)*vel, 0.02, true));
+    }
+    rodando=false;
+    UI.finalScore.textContent = `Pontuacao ${estado.pontos}`;
+    UI.overBox.style.display = 'block';
+  }
+
+  // colisões basicas
+  function colisaoCanhaoComCometa(c){
+    const dx = c.x - canhao.x;
+    const dy = c.y - canhao.y;
+    const r = c.raio + 26;
+    return dx*dx + dy*dy <= r*r;
+  }
+  function colisaoBalaComCometa(b,c){
+    const dx = b.x - c.x;
+    const dy = b.y - c.y;
+    const r = c.raio + b.r;
+    return dx*dx + dy*dy <= r*r;
+  }
+
+  // core update do jogo
+  function atualizar(dt){
+    if(!rodando) return;
+
+    // move canhao com nova fisica
+    canhao.update(dt);
+
+    // cometas caindo
+    for(const c of estado.cometas){
+      if(c.vivo){
+        c.update(dt);
+        if(colisaoCanhaoComCometa(c)){
+          c.vivo=false;
+          registrarDano();
+        }
+      }
+    }
+    estado.cometas = estado.cometas.filter(c=>c.vivo);
+
+    // balas subindo
+    for(const b of estado.balas) b.update(dt);
+
+    // check colisao bala com cometa
+    for(const b of estado.balas){
+      if(!b.viva) continue;
+      for(const c of estado.cometas){
+        if(!c.vivo) continue;
+        if(colisaoBalaComCometa(b,c)){
+          b.viva = false;
+          c.vivo = false;
+          const corExpl = c.correta ? COR.correto : COR.errado;
+          for(let k=0;k<26;k++){
+            const ang = rand(0, Math.PI*2);
+            const vel = rand(1.0, 3.2);
+            estado.particulas.push(new Particula(c.x, c.y, corExpl, 2, irand(18,30), Math.cos(ang)*vel, Math.sin(ang)*vel, 0, true));
+          }
+          if(c.correta){
+            estado.combo += 1;
+            estado.acertosSeguidos += 1;
+            const ganho = 80 * Gerador.nivel + 15 * estado.combo;
+            estado.pontos += ganho;
+            aumentarDificuldadeSeNecessario();
+          } else {
+            registrarDano();
+          }
+          break;
+        }
+      }
+    }
+    estado.balas = estado.balas.filter(b=>b.viva);
+
+    // particulas
+    for(const p of estado.particulas) p.update(dt);
+    estado.particulas = estado.particulas.filter(p=>p.vida>0);
+
+    // se ja destruiu a correta, prepara pro proximo
+    if(rodando && !estado.cometas.some(c=>c.vivo && c.correta)){
+      setTimeout(novaRodada, 600);
+    }
+  }
+
+  // painel top com infos do jogador
+  function desenharPainel(){
+    const h = 64;
+    ctx.save();
+    ctx.fillStyle = COR.painel;
+    ctx.fillRect(0,0,W,h);
+    ctx.fillStyle = COR.painelBorda;
+    ctx.fillRect(0,h-2,W,2);
+
+    setFont(18,true);
+    ctx.fillStyle = COR.texto;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(estado.enunciado, i(W/2), i(h/2));
+
+    setFont(14,false);
+    ctx.textAlign = 'left';
+    ctx.fillStyle = COR.textoFraco;
+    const baseY = 16;
+    ctx.fillText(`Pontos ${estado.pontos}`, 12, baseY);
+    ctx.fillText(`Vidas ${estado.vidas}`, 12, baseY+16);
+    ctx.fillText(`Combo x${estado.combo}`, 12, baseY+32);
+    ctx.fillText(`Nivel ${estado.nivel||Gerador.nivel}`, 12, baseY+48);
+    ctx.restore();
+  }
+
+  // draw geral
+  function desenhar(){
+    // fundo com estrelinhas discretas
+    ctx.fillStyle = COR.fundo;
+    ctx.fillRect(0,0,W,H);
+
+    ctx.save();
+    ctx.globalAlpha = 0.35;
+    for(let s=0;s<60;s++){
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(i((s*53)%W), i((s*97)%H), 2, 2);
+    }
+    ctx.restore();
+
+    desenharPainel();
+
+    for(const p of estado.particulas) p.draw();
+    for(const c of estado.cometas) c.draw();
+    for(const b of estado.balas) b.draw();
+
+    canhao.draw();
+    desenharMira();
+  }
+
+  // game loop com dt capado pra estabilidade
+  function loop(ts){
+    const dt = Math.min(0.05, (ts - ultimoTempo)/1000 || 0);
+    ultimoTempo = ts;
+    if(rodando) atualizar(dt);
+    desenhar();
+    requestAnimationFrame(loop);
+  }
+
+  // inputs de mouse
+  window.addEventListener('mousemove', e=>{
+    const rect = canvas.getBoundingClientRect();
+    mouse.x = clamp(e.clientX - rect.left, 0, W);
+    mouse.y = clamp(e.clientY - rect.top, 0, H);
+  });
+  window.addEventListener('mousedown', ()=>{
+    mouse.down = true;
+    if(rodando){
+      const b = canhao.atirar();
+      if(b) estado.balas.push(b);
+    }
+  });
+  window.addEventListener('mouseup', ()=>{ mouse.down = false; });
+
+  // inputs de teclado
+  window.addEventListener('keydown', e=>{
+    if(e.code === 'KeyA') keys.left = true;     // move left
+    if(e.code === 'KeyD') keys.right = true;    // move right
+    if(e.code === 'Space' && rodando){
+      const b = canhao.atirar();                // fire
+      if(b) estado.balas.push(b);
+    }
+  });
+  window.addEventListener('keyup', e=>{
+    if(e.code === 'KeyA') keys.left = false;
+    if(e.code === 'KeyD') keys.right = false;
+  });
+
+  // botoes de ui
+  UI.startBtn.addEventListener('click', iniciar);
+  canvas.addEventListener('click', ()=>{ if(!rodando) iniciar(); });
+  UI.restartBtn.addEventListener('click', ()=>{ reiniciar(); iniciar(); });
+
+  // fluxo de jogo
+  function iniciar(){
+    // start padrao
+    UI.startBox.style.display = 'none';
+    UI.overBox.style.display = 'none';
+    rodando = true;
+    ultimoTempo = performance.now();
+    estado.pontos=0; estado.vidas=3; estado.combo=0; estado.acertosSeguidos=0;
+    estado.velBase=0.9; estado.nivel=1; Gerador.nivel=1;
+    estado.explodiu=false; estado.particulas.length=0; estado.balas.length=0;
+    novaRodada();
+  }
+  function reiniciar(){
+    // reset simples
+    estado.cometas.length=0;
+    estado.particulas.length=0;
+    estado.balas.length=0;
+  }
+
+  // roda
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
